@@ -87,11 +87,7 @@ struct RootView: View {
 
     @ToolbarContentBuilder
     private var leadingToolbarItem: some ToolbarContent {
-        if #available(iOS 26.0, *) {
-            ToolbarItem(placement: .topBarLeading) { Brand().fixedSize() }.sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .topBarLeading) { Brand().fixedSize() }
-        }
+        ToolbarItem(placement: .topBarLeading) { Brand().fixedSize() }
     }
 }
 

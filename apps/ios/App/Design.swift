@@ -28,15 +28,10 @@ struct SoftGlass: ViewModifier {
         if reduceTransparency { content.background(.white, in: Capsule()) }
         else { softSurface(content) }
     }
-    @ViewBuilder
     private func softSurface(_ content: Content) -> some View {
-        if #available(iOS 26.0, *) {
-            content.glassEffect(.regular.tint(tint).interactive(), in: .capsule)
-        } else {
-            content
-                .background(tint, in: Capsule())
-                .overlay { Capsule().strokeBorder(.white.opacity(0.55), lineWidth: 0.5) }
-        }
+        content
+            .background(tint, in: Capsule())
+            .overlay { Capsule().strokeBorder(.white.opacity(0.55), lineWidth: 0.5) }
     }
 }
 
