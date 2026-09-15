@@ -19,13 +19,7 @@ struct RootView: View {
     }
     var body: some View {
         @Bindable var coordinator = coordinator
-        TabView(selection: $tab) {
-            Tab("Talk", systemImage: "waveform", value: 0) { shell { TalkView(coordinator: coordinator) } }
-            Tab("Themes", systemImage: "square.grid.2x2", value: 1) {
-                shell { ThemesView(coordinator: coordinator) { theme in coordinator.chooseTheme(theme); tab = 0 } }
-            }
-            Tab("Words", systemImage: "book", value: 2) { shell { WordsView(coordinator: coordinator) } }
-        }
+        tabs
         .tint(MuralColor.ink)
         .sheet(isPresented: $coordinator.showSettings) { SettingsView(coordinator: coordinator) }
         .sheet(isPresented: $coordinator.showAIConsent, onDismiss: { coordinator.resumeAfterAIConsent() }) {
@@ -56,15 +50,47 @@ struct RootView: View {
         }
         #endif
     }
+
+    @ViewBuilder
+    private var tabs: some View {
+        if #available(iOS 18.0, *) {
+            TabView(selection: $tab) {
+                Tab("Talk", systemImage: "waveform", value: 0) { shell { TalkView(coordinator: coordinator) } }
+                Tab("Themes", systemImage: "square.grid.2x2", value: 1) {
+                    shell { ThemesView(coordinator: coordinator) { theme in coordinator.chooseTheme(theme); tab = 0 } }
+                }
+                Tab("Words", systemImage: "book", value: 2) { shell { WordsView(coordinator: coordinator) } }
+            }
+        } else {
+            TabView(selection: $tab) {
+                shell { TalkView(coordinator: coordinator) }
+                    .tabItem { Label("Talk", systemImage: "waveform") }.tag(0)
+                shell { ThemesView(coordinator: coordinator) { theme in coordinator.chooseTheme(theme); tab = 0 } }
+                    .tabItem { Label("Themes", systemImage: "square.grid.2x2") }.tag(1)
+                shell { WordsView(coordinator: coordinator) }
+                    .tabItem { Label("Words", systemImage: "book") }.tag(2)
+            }
+        }
+    }
+
     private func shell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         NavigationStack {
             content().background(MuralColor.cream).toolbar {
-                ToolbarItem(placement: .topBarLeading) { Brand().fixedSize() }.sharedBackgroundVisibility(.hidden)
+                leadingToolbarItem
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { coordinator.showSettings = true } label: { Image(systemName: "slider.horizontal.3") }
                         .accessibilityLabel("Settings")
                 }
             }.toolbarBackground(MuralColor.cream, for: .navigationBar)
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var leadingToolbarItem: some ToolbarContent {
+        if #available(iOS 26.0, *) {
+            ToolbarItem(placement: .topBarLeading) { Brand().fixedSize() }.sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .topBarLeading) { Brand().fixedSize() }
         }
     }
 }

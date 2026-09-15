@@ -26,7 +26,17 @@ struct SoftGlass: ViewModifier {
     var tint: Color = .white.opacity(0.45)
     func body(content: Content) -> some View {
         if reduceTransparency { content.background(.white, in: Capsule()) }
-        else { content.glassEffect(.regular.tint(tint).interactive(), in: .capsule) }
+        else { softSurface(content) }
+    }
+    @ViewBuilder
+    private func softSurface(_ content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular.tint(tint).interactive(), in: .capsule)
+        } else {
+            content
+                .background(tint, in: Capsule())
+                .overlay { Capsule().strokeBorder(.white.opacity(0.55), lineWidth: 0.5) }
+        }
     }
 }
 
@@ -73,13 +83,7 @@ struct MuralOrb: View {
                     Circle().stroke(MuralColor.orange.opacity(listening ? 0.18 : 0), lineWidth: 1).padding(-6)
                     Circle().stroke(MuralColor.orange.opacity(listening ? 0.10 : 0), lineWidth: 1).padding(-16)
                     ZStack {
-                        MeshGradient(width: 3, height: 3, points: [
-                            [0,0], [0.5,0], [1,0],
-                            [0,0.5], [Float(0.5 + sin(phase) * 0.08), Float(0.5 + cos(phase) * 0.06)], [1,0.5],
-                            [0,1], [0.5,1], [1,1]
-                        ], colors: [Color(red: 1, green: 0.97, blue: 0.82), MuralColor.butter, MuralColor.peach,
-                                    Color(red: 1, green: 0.70, blue: 0.42), MuralColor.orange, Color(red: 0.80, green: 0.68, blue: 0.93),
-                                    Color(red: 0.96, green: 0.42, blue: 0.35), Color(red: 0.99, green: 0.62, blue: 0.46), Color(red: 0.86, green: 0.75, blue: 0.95)])
+                        orbSurface(phase: phase, side: side)
                         Ellipse().fill(.white.opacity(0.65)).frame(width: side * 0.48, height: side * 0.15).blur(radius: 13)
                             .rotationEffect(.degrees(-28)).offset(x: -side * 0.17, y: -side * 0.28)
                         Ellipse().stroke(MuralColor.butter.opacity(0.48), lineWidth: 16).frame(width: side * 1.2, height: side * 0.5)
@@ -96,6 +100,29 @@ struct MuralOrb: View {
                 }.frame(width: side, height: side).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func orbSurface(phase: Double, side: CGFloat) -> some View {
+        if #available(iOS 18.0, *) {
+            MeshGradient(width: 3, height: 3, points: [
+                [0,0], [0.5,0], [1,0],
+                [0,0.5], [Float(0.5 + sin(phase) * 0.08), Float(0.5 + cos(phase) * 0.06)], [1,0.5],
+                [0,1], [0.5,1], [1,1]
+            ], colors: [Color(red: 1, green: 0.97, blue: 0.82), MuralColor.butter, MuralColor.peach,
+                        Color(red: 1, green: 0.70, blue: 0.42), MuralColor.orange, Color(red: 0.80, green: 0.68, blue: 0.93),
+                        Color(red: 0.96, green: 0.42, blue: 0.35), Color(red: 0.99, green: 0.62, blue: 0.46), Color(red: 0.86, green: 0.75, blue: 0.95)])
+        } else {
+            ZStack {
+                LinearGradient(colors: [Color(red: 1, green: 0.97, blue: 0.82), MuralColor.butter, MuralColor.peach,
+                                        Color(red: 1, green: 0.70, blue: 0.42), MuralColor.orange, Color(red: 0.80, green: 0.68, blue: 0.93),
+                                        Color(red: 0.96, green: 0.42, blue: 0.35), Color(red: 0.99, green: 0.62, blue: 0.46), Color(red: 0.86, green: 0.75, blue: 0.95)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                RadialGradient(colors: [MuralColor.butter.opacity(0.85), .clear],
+                               center: UnitPoint(x: 0.5 + CGFloat(sin(phase)) * 0.08, y: 0.5 + CGFloat(cos(phase)) * 0.06),
+                               startRadius: 0, endRadius: side * 0.62)
+            }
+        }
     }
 }
 

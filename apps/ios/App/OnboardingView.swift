@@ -220,6 +220,13 @@ private struct OnboardingBackground: View {
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 20, paused: reduceMotion || scenePhase != .active)) { timeline in
             let phase = reduceMotion ? 0 : timeline.date.timeIntervalSinceReferenceDate * 0.14
+            backdrop(phase: phase)
+        }.background(MuralColor.cream).ignoresSafeArea().accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func backdrop(phase: Double) -> some View {
+        if #available(iOS 18.0, *) {
             MeshGradient(width: 3, height: 3, points: [
                 [0, 0], [0.5, 0], [1, 0],
                 [0, 0.5], [Float(0.5 + sin(phase) * 0.12), Float(0.45 + cos(phase) * 0.1)], [1, 0.5],
@@ -227,6 +234,15 @@ private struct OnboardingBackground: View {
             ], colors: [MuralColor.cream, MuralColor.butter.opacity(0.7), MuralColor.cream,
                         MuralColor.cream, MuralColor.peach.opacity(0.75), MuralColor.lilac.opacity(0.45),
                         MuralColor.cream, MuralColor.cream, MuralColor.cream])
-        }.background(MuralColor.cream).ignoresSafeArea().accessibilityHidden(true)
+        } else {
+            ZStack {
+                MuralColor.cream
+                RadialGradient(colors: [MuralColor.peach.opacity(0.75), .clear],
+                               center: UnitPoint(x: 0.5 + CGFloat(sin(phase)) * 0.12, y: 0.45 + CGFloat(cos(phase)) * 0.1),
+                               startRadius: 0, endRadius: 260)
+                LinearGradient(colors: [MuralColor.butter.opacity(0.7), MuralColor.lilac.opacity(0.45), .clear],
+                               startPoint: .top, endPoint: .bottom)
+            }
+        }
     }
 }
