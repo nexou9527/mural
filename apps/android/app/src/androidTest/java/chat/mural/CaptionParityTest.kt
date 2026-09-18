@@ -18,6 +18,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
+import okio.buffer
 import kotlinx.serialization.json.*
 import org.junit.*
 import org.junit.Assert.*
@@ -37,6 +38,7 @@ class CaptionParityTest {
     private var originalHasKey = false
     private val requests = LinkedBlockingQueue<String>()
     @Volatile private var responseGate: CountDownLatch? = null
+    @Volatile private var streamGate: CountDownLatch? = null
     @Volatile private var responseCode = 200
     @Volatile private var response = "This word is explained in the context of the sentence."
     private val recording get() = InstrumentationRegistry.getArguments().getString("record") == "true"
@@ -65,6 +67,30 @@ class CaptionParityTest {
                     }) })
                     put("usage", buildJsonObject { put("input_tokens", 0); put("output_tokens", 0) })
                 }
+                if (Json.parseToJsonElement(body).jsonObject["stream"] == JsonPrimitive(true) && status == 200) {
+                    val partial = buildJsonObject { put("type", "response.output_text.delta"); put("delta", reply.take(5)) }
+                    val completion = buildJsonObject { put("type", "response.completed"); put("response", payload) }
+                    val prefix = Buffer().writeUtf8("data: $partial\n\n")
+                    val suffix = Buffer().writeUtf8("data: $completion\n\n")
+                    val gate = streamGate
+                    val source = object : okio.Source {
+                        override fun read(sink: Buffer, byteCount: Long): Long {
+                            if (!prefix.exhausted()) return prefix.read(sink, byteCount)
+                            gate?.await(15, TimeUnit.SECONDS)
+                            return suffix.read(sink, byteCount)
+                        }
+                        override fun timeout() = okio.Timeout.NONE
+                        override fun close() { gate?.countDown() }
+                    }
+                    val streamBody = object : ResponseBody() {
+                        private val buffered = source.buffer()
+                        override fun contentType() = "text/event-stream".toMediaType()
+                        override fun contentLength() = -1L
+                        override fun source() = buffered
+                    }
+                    return@addInterceptor Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                        .header("Content-Type", "text/event-stream").body(streamBody).build()
+                }
                 Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(status).message(if (status == 200) "OK" else "Fixture error")
                     .body(payload.toString().toResponseBody("application/json".toMediaType())).build()
             }.build()
@@ -81,6 +107,7 @@ class CaptionParityTest {
     }
     @After fun restore() {
         responseGate?.countDown()
+        streamGate?.countDown()
         finishRecording()
         if (!::vm.isInitialized || !::original.isInitialized) return
         compose.runOnIdle {
@@ -205,6 +232,148 @@ class CaptionParityTest {
         }
     }
 
+    @Test fun everyLanguagePreservesProviderFragmentsAndDisplaysMeaningBeforeCompletion() {
+        val samples = mapOf(
+            "nb" to listOf("Hygg", "elig! Jeg liker fri", "luftsliv."),
+            "en" to listOf("That is inter", "esting."),
+            "es" to listOf("Me gusta apren", "der espa", "ñol."),
+            "fr" to listOf("Aujourd", "’hui, c’est inté", "ressant."),
+            "de" to listOf("Das ist eine Sprach", "lern", "anwendung."),
+            "it" to listOf("È una conver", "sazione interes", "sante."),
+            "pt" to listOf("Estou apren", "dendo portu", "guês."),
+            "zh" to listOf("我", "喜欢", "学习", "中文。"))
+        assertEquals(LanguageRegistry.all.map { it.id }.toSet(), samples.keys)
+        for ((language, parts) in samples) {
+            show(language, "", "")
+            val gate = CountDownLatch(1); streamGate = gate; response = "Meaning for $language"
+            compose.runOnIdle {
+                vm.updatePreferences(vm.archive.preferences.copy(meaningVisible = false))
+                state("session", SessionRecord(languageID = language, title = "Synthetic stream verification"))
+                val handle = MuralViewModel::class.java.getDeclaredMethod("handle", JsonObject::class.java).apply { isAccessible = true }
+                parts.forEachIndexed { index, part -> handle.invoke(vm, buildJsonObject {
+                    put("type", "session.output_transcript.delta"); put("delta", part)
+                    put("start_ms", index * 100); put("end_ms", (index + 1) * 100); put("event_id", "$language-$index")
+                }) }
+                vm.updatePreferences(vm.archive.preferences.copy(meaningVisible = true))
+                MuralViewModel::class.java.getDeclaredMethod("scheduleTranslation", Boolean::class.javaPrimitiveType)
+                    .apply { isAccessible = true }.invoke(vm, true)
+            }
+            compose.onNodeWithTag("target-caption").assertTextEquals(parts.joinToString(""))
+            compose.waitUntil(10_000) { vm.meaning == response.take(5) }
+            compose.onNodeWithTag("meaning-caption").assertTextEquals(response.take(5))
+            compose.runOnIdle { assertTrue(vm.session!!.translations.isEmpty()) }
+            gate.countDown()
+            compose.waitUntil(10_000) { vm.meaning == response }
+            compose.runOnIdle { assertEquals(listOf(response), vm.session!!.translations.values.toList()) }
+            capture("stream-$language")
+            streamGate = null
+        }
+    }
+
+    @Test fun endingKeepsOnlyTheSpecificEndReasonNotice() {
+        for (reason in listOf("Inactivity", "Time limit", "Ended by you")) {
+            show("es", "Hola.", "Hello.")
+            compose.runOnIdle {
+                state("notice", "Stale help notice")
+                vm.end(reason)
+                val expected = when (reason) {
+                    "Inactivity" -> compose.activity.getString(R.string.notice_ended_inactivity)
+                    "Time limit" -> compose.activity.getString(R.string.notice_time_limit_reached)
+                    else -> null
+                }
+                assertEquals("ended", vm.state)
+                assertEquals(expected, vm.notice)
+            }
+        }
+    }
+
+    @Test fun typedReplyFailureRetriesWithoutDuplicateTranscriptRows() {
+        show("es", "Hola.", "Hello.")
+        responseCode = 503
+        val typeButton = compose.onNodeWithText(compose.activity.getString(R.string.talk_type_button))
+        if (!typeButton.isDisplayed()) typeButton.performScrollTo()
+        typeButton.performClick()
+        compose.onNodeWithTag("typed-reply-input").performTextInput("Quiero un café.")
+        compose.onNodeWithTag("typed-reply-send").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("typed-reply-error").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("typed-reply-error").assertIsDisplayed()
+        compose.onNodeWithTag("typed-reply-input").assertTextContains("Quiero un café.")
+        capture("typed-reply-failure")
+        compose.runOnIdle { assertEquals(0, vm.session!!.fragments.count { it.speaker == Speaker.user }); assertNull(vm.error) }
+        responseCode = 200; response = "Gracias."
+        compose.onNodeWithTag("typed-reply-send").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("typed-reply-input").fetchSemanticsNodes().isEmpty() }
+        compose.runOnIdle {
+            assertEquals(listOf("Quiero un café."), vm.session!!.fragments.filter { it.speaker == Speaker.user }.map { it.text })
+            assertNull(vm.typedReplyError)
+        }
+    }
+
+    @Test fun typedReplyAuthenticationFailureKeepsRecoveryActionAndDraft() {
+        show("es", "Hola.", "Hello.")
+        responseCode = 401
+        val typeButton = compose.onNodeWithText(compose.activity.getString(R.string.talk_type_button))
+        if (!typeButton.isDisplayed()) typeButton.performScrollTo()
+        typeButton.performClick()
+        compose.onNodeWithTag("typed-reply-input").performTextInput("Quiero un café.")
+        compose.onNodeWithTag("typed-reply-send").performClick()
+        compose.waitUntil(10_000) { vm.errorNeedsKeySetup }
+        compose.onNodeWithText(compose.activity.getString(R.string.error_go_to_settings)).assertIsDisplayed()
+        compose.onNodeWithText(compose.activity.getString(R.string.common_ok)).performClick()
+        compose.onNodeWithTag("typed-reply-input").assertTextContains("Quiero un café.")
+        compose.onNodeWithTag("typed-reply-error").assertIsDisplayed()
+        compose.runOnIdle { assertEquals(0, vm.session!!.fragments.count { it.speaker == Speaker.user }) }
+        responseCode = 200; response = "Gracias."
+        compose.onNodeWithTag("typed-reply-send").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("typed-reply-input").fetchSemanticsNodes().isEmpty() }
+        compose.runOnIdle { assertEquals(1, vm.session!!.fragments.count { it.speaker == Speaker.user }) }
+    }
+
+    @Test fun longMeaningRequestKeepsEveryCharacterAndCachesTheFullRevision() {
+        val caption = "UNIQUE_START " + "我喜欢咖啡。 ".repeat(600) + " UNIQUE_END"
+        response = "The entire caption, including its beginning and end."
+        show("zh", caption, "")
+        requests.clear()
+        compose.runOnIdle {
+            MuralViewModel::class.java.getDeclaredMethod("scheduleTranslation", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(vm, true)
+        }
+        compose.waitUntil(10_000) { vm.meaning == response }
+        val request = Json.parseToJsonElement(checkNotNull(requests.poll(2, TimeUnit.SECONDS))).jsonObject
+        assertEquals(caption, request.getValue("input").jsonArray.single().jsonObject.getValue("content").jsonPrimitive.content)
+        compose.runOnIdle {
+            val passage = vm.session!!.passages.single()
+            assertEquals(response, vm.session!!.translations[MeaningRequest.cacheKey(passage.revisionKey, "English")])
+        }
+        compose.onNodeWithTag("start-conversation").assertIsDisplayed()
+        compose.onNodeWithTag("floating-navigation").assertIsDisplayed()
+    }
+
+    @Test fun oversizedHostedMeaningShowsLimitWithoutDispatchOrRetry() {
+        show("zh", "我".repeat(8193), "")
+        requests.clear()
+        compose.runOnIdle {
+            val hosted = MuralViewModel::class.java.getDeclaredField("hostedSessionIDs").apply { isAccessible = true }
+            hosted.set(vm, setOf(vm.session!!.id))
+            MuralViewModel::class.java.getDeclaredMethod("scheduleTranslation", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(vm, true)
+        }
+        compose.waitUntil(10_000) { vm.meaningLimitReached }
+        compose.onNodeWithText(compose.activity.getString(R.string.talk_meaning_too_long)).assertIsDisplayed()
+        compose.onNodeWithText(compose.activity.getString(R.string.talk_retry_meaning_button)).assertDoesNotExist()
+        assertTrue("An oversized hosted caption must not reach the provider", requests.isEmpty())
+        compose.runOnIdle {
+            MuralViewModel::class.java.getDeclaredField("hostedSessionIDs").apply { isAccessible = true }.set(vm, emptySet<String>())
+        }
+        show("zh", "你好。", "")
+        compose.runOnIdle {
+            MuralViewModel::class.java.getDeclaredMethod("scheduleTranslation", Boolean::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(vm, true)
+        }
+        compose.waitUntil(10_000) { vm.meaning == response }
+        compose.runOnIdle { assertFalse(vm.meaningLimitReached) }
+    }
+
     @Test fun lookupKeepsItsSentenceAndDismissalCancelsTheOldResult() {
         val sentence = "Quiero un café con leche."
         show("es", sentence, "I want a coffee with milk.")
@@ -287,13 +456,30 @@ class CaptionParityTest {
         if (!microphone.isDisplayed()) microphone.performScrollTo()
         microphone.assertIsDisplayed()
         compose.onNodeWithTag("floating-navigation").assertIsDisplayed()
+
+        // Large text uses the page scroller. A long reply and its reading must stay
+        // reachable without requiring both languages to fit on screen at once.
+        compose.onNodeWithTag("pinyin-toggle").performScrollTo().performClick()
+        show("zh", sentence + "今天我们可以聊一聊你的生活。你喜欢喝咖啡还是喝茶？如果你有时间，我们可以一起去附近的咖啡馆，再去商店买一点儿东西。你觉得怎么样？你也可以告诉我你最喜欢的食物，或者说说你明天想做什么。",
+            "I want to go to the bank, then travel. We can talk about your life, visit a café, and buy a few things. What would you like to do tomorrow?")
+        compose.onNodeWithTag("target-caption").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("pinyin-reading").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("pinyin-toggle").performScrollTo().performClick()
+        compose.onNodeWithTag("pinyin-reading").assertDoesNotExist()
+        compose.onNodeWithTag("meaning-caption").performScrollTo().assertIsDisplayed()
+        if (!microphone.isDisplayed()) microphone.performScrollTo()
+        microphone.assertIsDisplayed()
+        compose.onNodeWithTag("floating-navigation").assertIsDisplayed()
     }
 
     @Test fun longMandarinReplyKeepsBothCaptionsVisibleAndEveryReadingReachable() {
         val sentence = "你好！很高兴认识你。你的中文说得很好。今天我们可以聊一聊你的生活。你喜欢喝咖啡还是喝茶？如果你有时间，我们可以一起去附近的咖啡馆，然后去银行，再去商店买一点儿东西。你觉得怎么样？你也可以告诉我你最喜欢的食物，或者说说你明天想做什么。"
+        android.util.Log.i("MuralCaptionCheck", "Long caption: render")
         show("zh", sentence, "Hello! Nice to meet you. Your Chinese is good. We can go to a café, then the bank, and buy a few things. What do you think?")
         assertTextVisible("target-caption", false); assertTextVisible("meaning-caption", false)
+        android.util.Log.i("MuralCaptionCheck", "Long caption: capture")
         capture("mandarin-long-caption")
+        android.util.Log.i("MuralCaptionCheck", "Long caption: scroll reading")
         val target = compose.onNodeWithTag("target-passage-scroll")
         val meaning = compose.onNodeWithTag("meaning-passage-scroll").fetchSemanticsNode().boundsInRoot
         val range = target.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange]
@@ -304,5 +490,6 @@ class CaptionParityTest {
         compose.onNodeWithTag("pinyin-reading").assertDoesNotExist()
         compose.onNodeWithTag("start-conversation").assertIsDisplayed()
         compose.onNodeWithTag("floating-navigation").assertIsDisplayed()
+        android.util.Log.i("MuralCaptionCheck", "Long caption: verified")
     }
 }
