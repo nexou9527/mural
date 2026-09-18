@@ -39,11 +39,15 @@ struct OrbShape: Shape {
     var phase: Double
     var energy: Double
     func path(in rect: CGRect) -> Path {
-        let points = (0..<12).map { index -> CGPoint in
-            let a = Double(index) / 12 * .pi * 2
-            let wave = sin(a * 3 + phase) * 0.021 + cos(a * 2 - phase * 0.7) * (0.012 + energy * 0.025)
-            let radius = min(rect.width, rect.height) * (0.47 + wave)
-            return CGPoint(x: rect.midX + cos(a) * radius, y: rect.midY + sin(a) * radius)
+        let side = Double(min(rect.width, rect.height))
+        let points: [CGPoint] = (0..<12).map { index in
+            let a: Double = Double(index) / 12.0 * Double.pi * 2.0
+            let waveA: Double = sin(a * 3.0 + phase) * 0.021
+            let waveB: Double = cos(a * 2.0 - phase * 0.7) * (0.012 + energy * 0.025)
+            let radius: Double = side * (0.47 + waveA + waveB)
+            let x = rect.midX + CGFloat(cos(a) * radius)
+            let y = rect.midY + CGFloat(sin(a) * radius)
+            return CGPoint(x: x, y: y)
         }
         var p = Path()
         for i in 0..<12 {
